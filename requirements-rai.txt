@@ -1,0 +1,4 @@
+# Optional simulation/planning backend only; never a core dependency.
+# Intentionally no package requirement until the team verifies the course RAI
+# distribution, version/commit, Python compatibility, and installation method.
+# This file currently installs nothing. See README.md and docs/architecture.md.
