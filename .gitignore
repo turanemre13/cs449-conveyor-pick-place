@@ -220,6 +220,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # CS449 generated evaluation artifacts and local temporary output
+/z.log.global
 /outputs/
 /experiments/results/
 /plots/

@@ -1,4 +1,5 @@
-# Optional simulation/planning backend only; never a core dependency.
-# Intentionally no package requirement until the team verifies the course RAI
-# distribution, version/commit, Python compatibility, and installation method.
-# This file currently installs nothing. See README.md and docs/architecture.md.
+# Optional simulation/planning backend; the core package remains independent.
+# Matches the course HW1 backend, installed separately in this project's .venv.
+# The wheel includes Panda models; no separate model download is required.
+# Initial target: WSL2 Ubuntu 24.04, x86_64, Python 3.12.
+robotic==0.4.1
