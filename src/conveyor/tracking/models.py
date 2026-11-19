@@ -9,11 +9,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
-from typing import Any, ClassVar
+from typing import ClassVar
 
+from conveyor.grasping.geometry import GEOMETRY_TYPES, ObjectGeometry
+from conveyor.scheduling.models import SchedulableObject
 from conveyor.types import TrackedState, Vector3
 
-GEOMETRY_TYPES = ("box", "cylinder")
 TRACK_TENTATIVE = "tentative"
 TRACK_CONFIRMED = "confirmed"
 
@@ -165,62 +166,20 @@ class TrackedObject:
     def is_confirmed(self) -> bool:
         return self.status == TRACK_CONFIRMED
 
-    def to_object_geometry(self) -> Any:
-        """Build a ``conveyor.grasping.geometry.ObjectGeometry`` if available, else a duck-typed record."""
+    def to_object_geometry(self) -> ObjectGeometry:
+        """Build a :class:`conveyor.grasping.geometry.ObjectGeometry` from this track."""
         dims = (
             (self.dimensions_m[0], self.dimensions_m[0], self.dimensions_m[2])
             if self.geometry_type == "cylinder"
             else self.dimensions_m
         )
-        try:
-            from conveyor.grasping.geometry import ObjectGeometry  # type: ignore[attr-defined]
+        return ObjectGeometry(
+            object_id=self.object_id,
+            geometry_type=self.geometry_type,
+            dimensions_m=dims,
+            yaw_rad=0.0 if self.geometry_type == "cylinder" else self.yaw_rad,
+        )
 
-            return ObjectGeometry(
-                object_id=self.object_id,
-                geometry_type=self.geometry_type,
-                dimensions_m=dims,
-                yaw_rad=0.0 if self.geometry_type == "cylinder" else self.yaw_rad,
-            )
-        except (ImportError, AttributeError):
-            return _FallbackGeometry(
-                object_id=self.object_id,
-                geometry_type=self.geometry_type,
-                dimensions_m=dims,
-                yaw_rad=0.0 if self.geometry_type == "cylinder" else self.yaw_rad,
-            )
-
-    def to_schedulable_object(self) -> Any:
-        """Build a ``conveyor.scheduling.models.SchedulableObject`` if available, else a duck-typed record."""
-        geom = self.to_object_geometry()
-        try:
-            from conveyor.scheduling.models import SchedulableObject  # type: ignore[import-not-found]
-
-            return SchedulableObject(state=self.state, geometry=geom)
-        except (ImportError, AttributeError):
-            return _FallbackSchedulableObject(state=self.state, geometry=geom)
-
-
-@dataclass(frozen=True)
-class _FallbackGeometry:
-    """Duck-typed stand-in for ``ObjectGeometry`` when grasping branch is not yet merged."""
-
-    object_id: str
-    geometry_type: str
-    dimensions_m: Vector3
-    yaw_rad: float = 0.0
-
-    @property
-    def height_m(self) -> float:
-        return self.dimensions_m[2]
-
-
-@dataclass(frozen=True)
-class _FallbackSchedulableObject:
-    """Duck-typed stand-in for ``SchedulableObject`` when scheduling branch is not yet merged."""
-
-    state: TrackedState
-    geometry: Any
-
-    @property
-    def object_id(self) -> str:
-        return self.state.object_id
+    def to_schedulable_object(self) -> SchedulableObject:
+        """Build a :class:`conveyor.scheduling.models.SchedulableObject` from this track."""
+        return SchedulableObject(state=self.state, geometry=self.to_object_geometry())

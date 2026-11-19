@@ -5,11 +5,21 @@ from __future__ import annotations
 from math import hypot
 import unittest
 
+from conveyor.grasping import ObjectGeometry, select_top_down_grasps
 from conveyor.perception import (
     DetectedObject,
     RGBDObjectDetector,
     advance_specs_along_belt,
     render_synthetic_rgbd,
+)
+from conveyor.prediction import ConstantVelocityPredictor
+from conveyor.scheduling import (
+    DeadlineAwareGreedyScheduler,
+    FifoNearestRobotScheduler,
+    SchedulableObject,
+    SchedulerConfig,
+    default_robot_configs,
+    schedulable_objects_from_tracker,
 )
 from conveyor.simulation.scenarios import generate_scenario
 from conveyor.tracking import (
@@ -159,11 +169,31 @@ class TestMultiObjectTracker(unittest.TestCase):
             self.assertLess(vel_err, 0.006)
             self.assertEqual(trk.geometry_type, spec.geometry_type)
 
-        schedulables = tracker.schedulable_objects()
+        schedulables = schedulable_objects_from_tracker(tracker)
         self.assertEqual(len(schedulables), len(final_specs))
         for item in schedulables:
+            self.assertIsInstance(item, SchedulableObject)
             self.assertIsInstance(item.state, TrackedState)
+            self.assertIsInstance(item.geometry, ObjectGeometry)
             self.assertEqual(item.object_id, item.geometry.object_id)
+
+        # Verify direct integration with Hüseyin's predictor, grasp selector, and dual-arm schedulers
+        now_s = float(tracker.current_time_s or 0.0)
+        predictor = ConstantVelocityPredictor(planar_motion=True)
+        predicted = predictor.predict_many([o.state for o in schedulables], now_s + 1.0)
+        self.assertEqual(len(predicted), len(final_specs))
+
+        cfg = SchedulerConfig()
+        robots = default_robot_configs(("robot_a", "robot_b"), available_at_s=now_s)
+        greedy_res = DeadlineAwareGreedyScheduler(cfg).schedule(schedulables, robots, now_s)
+        fifo_res = FifoNearestRobotScheduler(cfg).schedule(schedulables, robots, now_s)
+        self.assertEqual(len(greedy_res.assignments), len(final_specs))
+        self.assertEqual(len(fifo_res.assignments), len(final_specs))
+        self.assertGreater(len(greedy_res.assigned), 0)
+        for assignment in greedy_res.assigned:
+            self.assertIn(assignment.robot_id, ("robot_a", "robot_b"))
+            self.assertIsNotNone(assignment.grasp)
+            self.assertGreaterEqual(assignment.intercept_time_s, now_s)
 
 
 if __name__ == "__main__":

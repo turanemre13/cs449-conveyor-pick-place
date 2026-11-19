@@ -8,7 +8,7 @@ estimates; IK/KOMO feasibility and execution belong to planning/control.
 
 from .adapters import (
     default_robot_configs, robot_configs_from_snapshots, schedulable_objects_from_ground_truth,
-    schedulable_objects_from_specs,
+    schedulable_objects_from_specs, schedulable_objects_from_tracker,
 )
 from .baseline import FifoNearestRobotScheduler
 from .greedy import DeadlineAwareGreedyScheduler
@@ -22,5 +22,6 @@ __all__ = [
     "Assignment", "DeadlineAwareGreedyScheduler", "FifoNearestRobotScheduler", "ReachModel",
     "RobotConfig", "SchedulableObject", "ScheduleMetrics", "ScheduleResult", "SchedulerConfig",
     "TimingModel", "WorkspaceConfig", "default_robot_configs", "input_observation_window_s", "robot_configs_from_snapshots",
-    "schedulable_objects_from_ground_truth", "schedulable_objects_from_specs", "summarize",
+    "schedulable_objects_from_ground_truth", "schedulable_objects_from_specs",
+    "schedulable_objects_from_tracker", "summarize",
 ]

@@ -70,6 +70,7 @@ Connecting perception + tracking to Hüseyin's prediction, grasp selection and d
 
 ```python
 from conveyor.perception import RGBDObjectDetector
+from conveyor.scheduling import schedulable_objects_from_tracker
 from conveyor.tracking import MultiObjectTracker
 
 detector = RGBDObjectDetector()
@@ -85,7 +86,7 @@ tracked_states = tracker.get_tracked_states()
 
 # 2) Direct SchedulableObject(state=TrackedState, geometry=ObjectGeometry) list
 #    for DeadlineAwareGreedyScheduler / FifoNearestRobotScheduler:
-schedulable_objects = tracker.schedulable_objects()
+schedulable_objects = schedulable_objects_from_tracker(tracker)
 schedule_result = scheduler.schedule(schedulable_objects, robots, observation.simulation_time_s)
 ```
 

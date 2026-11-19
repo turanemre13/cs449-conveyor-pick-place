@@ -10,15 +10,10 @@ from __future__ import annotations
 from math import atan2, cos, hypot, isfinite, pi, sin
 from typing import Any
 
+from conveyor.grasping.geometry import wrap_half_turn
 from conveyor.types import ObjectObservation
 
 from .models import DetectedObject, PerceptionConfig
-
-
-def _wrap_half_turn(angle_rad: float) -> float:
-    """Wrap an angle to ``(-pi/2, pi/2]`` for 180-degree symmetric rectangles."""
-    wrapped = (angle_rad + pi / 2.0) % pi - pi / 2.0
-    return pi / 2.0 if wrapped == -pi / 2.0 else float(wrapped)
 
 
 class RGBDObjectDetector:
@@ -319,10 +314,10 @@ class RGBDObjectDetector:
         # Canonicalise box dimensions so dx >= dy, adjusting yaw accordingly.
         if span_u >= span_v:
             dx_box, dy_box = span_u, span_v
-            yaw_box = _wrap_half_turn(theta_rad)
+            yaw_box = wrap_half_turn(theta_rad)
         else:
             dx_box, dy_box = span_v, span_u
-            yaw_box = _wrap_half_turn(theta_rad + pi / 2.0)
+            yaw_box = wrap_half_turn(theta_rad + pi / 2.0)
 
         # Shape classification: compare filled mask against ideal box vs ideal circle in pixel space.
         geometry_type, diameter_m, shape_conf = self._classify_shape(

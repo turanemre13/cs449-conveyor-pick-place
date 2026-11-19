@@ -103,3 +103,27 @@ def schedulable_objects_from_specs(
                              (float(belt_speed_m_s), 0.0, 0.0))
         result.append(SchedulableObject(state, geometry_from_spec(spec)))
     return result
+
+
+def schedulable_objects_from_tracker(
+    tracker_or_tracks: Any,
+    *,
+    confirmed_only: bool = True,
+) -> list[SchedulableObject]:
+    """Convert :class:`conveyor.tracking.MultiObjectTracker` or :class:`TrackedObject` records to scheduler inputs."""
+    if hasattr(tracker_or_tracks, "schedulable_objects"):
+        items = tracker_or_tracks.schedulable_objects(confirmed_only=confirmed_only)
+    elif hasattr(tracker_or_tracks, "get_tracked_objects"):
+        items = [t.to_schedulable_object() for t in tracker_or_tracks.get_tracked_objects(confirmed_only=confirmed_only)]
+    else:
+        items = []
+        for item in tracker_or_tracks:
+            if isinstance(item, SchedulableObject):
+                items.append(item)
+            elif hasattr(item, "to_schedulable_object"):
+                if confirmed_only and hasattr(item, "is_confirmed") and not item.is_confirmed:
+                    continue
+                items.append(item.to_schedulable_object())
+            else:
+                raise TypeError(f"Cannot convert {type(item).__name__!r} to SchedulableObject")
+    return sorted(items, key=lambda o: o.object_id)

@@ -22,6 +22,14 @@ from conveyor.perception import (
     advance_specs_along_belt,
     render_synthetic_rgbd,
 )
+from conveyor.scheduling import (
+    DeadlineAwareGreedyScheduler,
+    FifoNearestRobotScheduler,
+    SchedulerConfig,
+    default_robot_configs,
+    schedulable_objects_from_tracker,
+    summarize,
+)
 from conveyor.simulation.camera import CameraCalibration, CameraObservation
 from conveyor.simulation.scenarios import generate_scenario
 from conveyor.tracking import MultiObjectTracker
@@ -159,8 +167,21 @@ def main() -> int:
             f"max = {max(vel_errors_mm_s):.2f} mm/s"
         )
         print(f"  Shape accuracy   : {shape_correct}/{len(final_specs)} ({100.0*shape_correct/len(final_specs):.1f}%)")
-    schedulables = tracker.schedulable_objects()
+    schedulables = schedulable_objects_from_tracker(tracker)
     print(f"  Schedulable handoff records ready for Hüseyin's module: {len(schedulables)}")
+
+    print("\n=== Dual-Arm Scheduling on Tracked States (Perception -> Tracking -> Scheduling) ===")
+    cfg = SchedulerConfig()
+    robots = default_robot_configs(("robot_a", "robot_b"), available_at_s=final_t)
+    for SchedCls in (DeadlineAwareGreedyScheduler, FifoNearestRobotScheduler):
+        res = SchedCls(cfg).schedule(schedulables, robots, final_t)
+        m = summarize(res)
+        print(f"  [{res.method}] scheduled {m.scheduled}/{m.objects} (per robot: {m.per_robot})")
+        for a in res.assigned:
+            print(
+                f"    {a.robot_id} -> {a.object_id} at t={a.intercept_time_s:6.2f} s  "
+                f"pos={_fmt(a.intercept_position_m)} m  slack={a.slack_s:5.2f} s  grasp={a.grasp.grasp_type}"
+            )
     return 0
 
 

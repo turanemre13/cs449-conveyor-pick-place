@@ -5,20 +5,16 @@ from __future__ import annotations
 from math import atan2, cos, isfinite, pi, sin, sqrt
 from typing import Any
 
+from conveyor.grasping.geometry import wrap_half_turn
 from conveyor.types import TrackedState, Vector3
 
 from .models import TRACK_CONFIRMED, TRACK_TENTATIVE, TrackedObject, TrackerConfig
 
 
-def _wrap_half_turn(angle_rad: float) -> float:
-    wrapped = (angle_rad + pi / 2.0) % pi - pi / 2.0
-    return pi / 2.0 if wrapped == -pi / 2.0 else float(wrapped)
-
-
 def _blend_half_turn_angles(old_angle: float, new_angle: float, alpha: float) -> float:
     """Smooth two pi-periodic orientation angles (parallel-jaw box symmetry)."""
-    delta = _wrap_half_turn(new_angle - old_angle)
-    return _wrap_half_turn(old_angle + alpha * delta)
+    delta = wrap_half_turn(new_angle - old_angle)
+    return wrap_half_turn(old_angle + alpha * delta)
 
 
 class ConstantVelocityKalmanFilter3D:
@@ -74,7 +70,7 @@ class ConstantVelocityKalmanFilter3D:
 
         # Geometry and lifecycle state
         self.dimensions_m: Vector3 = tuple(float(d) for d in dimensions_m)  # type: ignore[assignment]
-        self.yaw_rad: float = 0.0 if geometry_type == "cylinder" else _wrap_half_turn(float(yaw_rad))
+        self.yaw_rad: float = 0.0 if geometry_type == "cylinder" else wrap_half_turn(float(yaw_rad))
         self.color_rgb: Vector3 = tuple(float(c) for c in color_rgb)  # type: ignore[assignment]
         self._shape_votes: dict[str, int] = {"box": 0, "cylinder": 0}
         self._shape_votes[geometry_type if geometry_type in self._shape_votes else "box"] += 1
