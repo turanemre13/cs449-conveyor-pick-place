@@ -97,3 +97,77 @@ RAI:
 ```bash
 .venv/bin/python scripts/interface_demo.py
 ```
+
+## Free TCP interception
+
+Run `.venv/bin/python scripts/free_tcp_demo.py` to see a teal gripper approach
+one moving box, match its speed, and measure alignment at the time assigned by
+the scheduler. The viewer repeats the interception and closes with Q or Esc.
+Add `--no-view` for one headless pass or `--speed` to vary the belt speed. Both
+Pandas stay parked. The demo measures geometric interception with an open
+gripper. Closing the jaws, attaching the box, and Panda motion are later stages.
+
+## Static Panda motion with KOMO
+
+Run `.venv/bin/python scripts/static_panda_demo.py` to see Panda A move to a
+fixed pose above the stopped belt while Panda B stays parked. The demo
+checks joint limits, joint speed, and separation from collidable geometry at
+the playback samples, then reports the achieved TCP pose error. Add `--no-view`
+for one headless pass. Close the viewer with Q or Esc.
+
+## Scheduled moving-box interception with Panda
+
+Run `.venv/bin/python scripts/moving_panda_demo.py` to see the selected Panda
+approach the orange box on the belt and match its velocity at the scheduled
+time. Add `--no-view` for one pass or `--speed 0.20` to try another belt speed.
+The jaws remain open during this alignment demo. Position, relative speed,
+timing, and orientation errors are measured against the live simulation.
+
+Add `--lift` to close the jaws while tracking the box, confirm bilateral jaw
+contact, and lift it approximately 12 cm. The simulator uses a rigid kinematic
+attachment once contact is verified. The lift checks clearance for the arm and
+the carried box. The viewer replays the cycle after a short pause.
+
+Add `--place` to run the complete pick-and-place sequence for one moving box.
+The demo transports it to the selected Panda's bin, checks that it reaches the
+floor within tolerance, opens the jaws, and verifies that the box stays inside
+while the arm retreats. The box is detached from the gripper at release and
+held in its world pose for this kinematic demo.
+
+Add `--perception --place` to schedule the single-box run from live RGB-D and
+Kalman tracking. The belt advances for 0.50 s while the camera confirms the
+track. Its estimated position, velocity, dimensions and yaw feed scheduling,
+and the simulator's frame identity and collision geometry are used for
+collision checks and attachment. This mode requires the `perception` extra
+and an OpenGL/X11 display, including with `--no-view`.
+
+## Dual-Panda coordination
+
+Run `.venv/bin/python scripts/dual_panda_demo.py` to see both Pandas place
+objects from the same running conveyor. The default sparse layout uses seed 21
+and a belt speed of 0.022 m/s. The two plans are combined and checked with both
+arms, the held objects, and the moving belt objects in one scene before the
+viewer opens. Playback applies joint commands and attachment changes at their
+recorded simulation times. Use `--serial` for the same layout with one arm
+moving at a time and rescheduling after each placement. `--no-view` reports
+one batch, and Q or Esc closes the viewer.
+
+Add `--perception` to prepare the concurrent batch from live RAI RGB-D and
+Kalman tracks. The camera confirms the two separated objects over 0.50 s and
+continues sampling at 5 Hz while the arms approach. Sampling stops when the
+first arm starts to descend, where the grippers can occlude the objects.
+Track estimates drive assignment and TCP targets. The simulator binds track
+IDs to scene frames, validates both pad distances, and checks both trajectories
+together. If two consecutive measurements move a predicted interception point
+by more than 5 mm, motion holds at the current approach pose while KOMO builds
+and validates a replacement timeline from both current joint states. Playback
+resumes only after validation succeeds. The simulation clock stays fixed during
+this calculation. The camera mode requires the `perception` extra and an
+OpenGL/X11 display, including with `--no-view`.
+
+The default layout can demonstrate feedback with a speed change at 0.75 s. The
+controller compensates the RGB-D tracks for the commanded belt motion.
+
+```bash
+.venv/bin/python scripts/dual_panda_demo.py --perception --change-speed-to 0.025
+```

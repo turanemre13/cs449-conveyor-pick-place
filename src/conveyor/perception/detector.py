@@ -118,11 +118,13 @@ class RGBDObjectDetector:
             h0 = int(stats[label_id, cv2.CC_STAT_HEIGHT])
             sub_labels = labels[y0 : y0 + h0, x0 : x0 + w0]
             comp_local = (sub_labels == label_id)
-            split_submasks = self._split_cluttered_component(
-                comp_local,
-                rgb_norm[y0 : y0 + h0, x0 : x0 + w0],
-                world_z_map[y0 : y0 + h0, x0 : x0 + w0],
-            )
+            split_submasks = [comp_local]
+            if cfg.split_clutter_components:
+                split_submasks = self._split_cluttered_component(
+                    comp_local,
+                    rgb_norm[y0 : y0 + h0, x0 : x0 + w0],
+                    world_z_map[y0 : y0 + h0, x0 : x0 + w0],
+                )
             for sub_mask in split_submasks:
                 if int(np.count_nonzero(sub_mask)) < cfg.min_contour_pixels:
                     continue

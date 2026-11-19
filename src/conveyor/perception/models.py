@@ -53,6 +53,7 @@ class PerceptionConfig:
     min_contour_pixels: int = 12
     circularity_threshold: float = 0.855
     circle_vs_box_iou_margin: float = 0.02
+    split_clutter_components: bool = True
 
     def __post_init__(self) -> None:
         _finite("belt_top_z_m", self.belt_top_z_m)
@@ -73,6 +74,8 @@ class PerceptionConfig:
             raise ValueError("min_contour_pixels must be an integer >= 3")
         _finite("circularity_threshold", self.circularity_threshold, positive=True)
         _finite("circle_vs_box_iou_margin", self.circle_vs_box_iou_margin)
+        if not isinstance(self.split_clutter_components, bool):
+            raise ValueError("split_clutter_components must be a boolean")
 
 
 @dataclass(frozen=True)

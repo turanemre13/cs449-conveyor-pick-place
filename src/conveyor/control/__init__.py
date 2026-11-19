@@ -1,4 +1,1 @@
-"""Trajectory execution and optional replanning coordination. Owner: Heysem.
-
-Interface placeholder; implementation is pending.
-"""
+"""Trajectory execution and interception evaluation."""

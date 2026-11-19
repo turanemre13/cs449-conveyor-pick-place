@@ -1,4 +1,1 @@
-"""IK/KOMO interception and placement motion plans. Owner: Hüseyin.
-
-Interface placeholder; implementation is pending.
-"""
+"""Interception and placement motion planning."""
