@@ -50,6 +50,8 @@ def execute_panda_placement(
     pickup: PandaInterception,
     *,
     after_step: Callable[[float], bool] | None = None,
+    bin_offset_m: tuple[float, float] = (0.0, 0.0),
+    align_bin_axes: bool = True,
 ) -> PandaPlacementResult | None:
     """Place a held object into the bin authored for the selected Panda."""
     closure = pickup.closure
@@ -66,7 +68,8 @@ def execute_panda_placement(
         raise PandaPlanningError("No target bin is assigned to the selected Panda")
     config = simulation.config
     neighbors = tuple(tracked_states_from_ground_truth(truth).values())
-    plan = plan_panda_placement(config, robot, pickup.object_id, target, closure, neighbors=neighbors)
+    plan = plan_panda_placement(config, robot, pickup.object_id, target, closure, neighbors=neighbors,
+                               bin_offset_m=bin_offset_m, align_bin_axes=align_bin_axes)
     names = list(robot.arm_joint_names)
     for motion in (plan.transfer, plan.descent):
         if not _play_arm(simulation, names, motion, after_step):

@@ -68,7 +68,7 @@ def require_object_in_bin(config, object_id, target) -> float:
     return gap
 
 
-def _placement_poses(config, robot, object_id, target):
+def _placement_poses(config, robot, object_id, target, bin_offset_m, align_bin_axes):
     import numpy as np
 
     bin_frame = config.getFrame(target.bin_frame)
@@ -82,6 +82,8 @@ def _placement_poses(config, robot, object_id, target):
     jaw_axis = bin_rotation[:, axis]
     if float(jaw_axis @ hand.getRotationMatrix()[:, 0]) < -0.001:
         jaw_axis = -jaw_axis
+    if not align_bin_axes:
+        jaw_axis = hand.getRotationMatrix()[:, 0]
     yaw = atan2(jaw_axis[1], jaw_axis[0])
     rotation = np.array(((cos(yaw), -sin(yaw), 0), (sin(yaw), cos(yaw), 0), (0, 0, 1)))
     quaternion = (cos(yaw / 2), 0.0, 0.0, sin(yaw / 2))
@@ -89,10 +91,12 @@ def _placement_poses(config, robot, object_id, target):
     object_rotation = bin_rotation.T @ rotation @ relative[:3, :3]
     extent = _object_half_extent(obj, object_rotation)
     width, depth, height = target.inner_dimensions_m
-    if extent[0] + _MIN_CLEARANCE_M > width / 2 or extent[1] + _MIN_CLEARANCE_M > depth / 2 or 2 * extent[2] > height:
+    x, y = bin_offset_m
+    if (abs(x) + extent[0] + _MIN_CLEARANCE_M > width / 2
+            or abs(y) + extent[1] + _MIN_CLEARANCE_M > depth / 2 or 2 * extent[2] > height):
         raise PandaPlanningError("The held object does not fit in the target bin at the placement orientation")
 
-    release = bin_frame.getPosition() - offset
+    release = bin_frame.getPosition() + bin_rotation @ (x, y, 0.0) - offset
     release[2] += extent[2] + 0.0003
     above = release.copy()
     above[2] = max(target.approach_position_m[2], release[2] + height + 0.04)
@@ -127,6 +131,8 @@ def _plan_motion(scratch, robot, pose, duration, slices, *, vertical, tracks, st
 
 def plan_panda_placement(
     config, robot, object_id: str, target, closure: FingerClosure, *, neighbors: tuple[TrackedState, ...] = (),
+    bin_offset_m: tuple[float, float] = (0.0, 0.0),
+    align_bin_axes: bool = True,
 ) -> PlacementPath:
     """Check the entire placement on a copy before changing live ownership."""
     scratch = arm_config(config, robot)
@@ -134,7 +140,9 @@ def plan_panda_placement(
     if parent is None or parent.name != robot.gripper_frame:
         raise PandaPlanningError("The object must be attached to the selected gripper")
     require_bilateral_contact(scratch, robot.gripper_frame, object_id, closure)
-    above, release = _placement_poses(scratch, robot, object_id, target)
+    if len(bin_offset_m) != 2 or not all(isfinite(value) for value in bin_offset_m):
+        raise ValueError("Bin offset must contain two finite coordinates")
+    above, release = _placement_poses(scratch, robot, object_id, target, bin_offset_m, align_bin_axes)
     pad_allowances = closure.contact_clearances(object_id)
     transfer = _plan_motion(
         scratch, robot, above, 4.0, 40, vertical=False, tracks=neighbors,

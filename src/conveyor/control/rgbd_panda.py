@@ -1,15 +1,18 @@
 """Feed RAI RGB-D tracking into scheduled Panda pickups."""
 
 from dataclasses import dataclass, replace
+from itertools import product
 from math import dist
 from typing import TYPE_CHECKING
 
+from conveyor.grasping import select_top_down_grasps
 from conveyor.perception import PerceptionConfig, RGBDObjectDetector
 from conveyor.planning.moving_panda import PandaInterception, plan_moving_panda
 from conveyor.planning.panda import PandaPlanningError
 from conveyor.prediction import tracked_states_from_ground_truth
 from conveyor.scheduling import (
-    DeadlineAwareGreedyScheduler, SchedulableObject, robot_configs_from_snapshots, schedulable_objects_from_tracker,
+    Assignment, DeadlineAwareGreedyScheduler, SchedulableObject, robot_configs_from_snapshots,
+    schedulable_objects_from_tracker,
 )
 from conveyor.tracking import MultiObjectTracker, TrackerConfig
 
@@ -108,37 +111,109 @@ def plan_tracked_pickups(
     close_jaws: bool = True, expected_bindings: dict[str, str] | None = None,
 ) -> tuple[CameraPickupPlan, ...]:
     """Schedule fresh camera tracks from the current robot and belt state."""
-    expected = set(simulation.on_belt_object_ids)
-    if len(objects) != len(expected):
-        raise PandaPlanningError(f"Expected {len(expected)} current camera tracks, got {len(objects)}")
-    robot_states = simulation.get_robot_states()
-    robots = robot_configs_from_snapshots(robot_states, simulation.get_targets())
-    scheduler = DeadlineAwareGreedyScheduler()
-    schedule = scheduler.schedule(objects, robots, simulation.simulation_time_s)
-    if len(schedule.assigned) != len(objects):
-        reason = schedule.rejected[0].reason if schedule.rejected else "incomplete assignment"
-        raise PandaPlanningError(f"Camera tracks were not fully assigned: {reason}")
-    if len(expected) == 2 and len({item.robot_id for item in schedule.assigned}) != 2:
-        raise PandaPlanningError("Concurrent camera pickup needs one assignment per Panda")
+    planner = CameraPickupPlanner(simulation, objects, close_jaws=close_jaws, expected_bindings=expected_bindings)
+    return planner.plan(planner.assignments)
 
-    # The frame name is needed for simulation collision checks and attachment.
-    # The target position, dimensions, yaw and interception still come from the tracker.
-    truth = {key: record for key, record in simulation.get_ground_truth(active_only=True).items() if key in expected}
-    bindings = _bind_scene_objects(objects, truth)
-    if expected_bindings is not None and bindings != expected_bindings:
-        raise PandaPlanningError("Camera track identities changed before replanning")
-    collision_tracks = tracked_states_from_ground_truth(truth)
-    estimated = {item.object_id: item.state for item in objects}
-    plans = []
-    for assignment in schedule.assigned:
-        track_id = assignment.object_id
-        object_id = bindings[track_id]
-        bound = replace(assignment, object_id=object_id, grasp=replace(assignment.grasp, object_id=object_id))
-        motion = plan_moving_panda(
-            simulation.config, robot_states[bound.robot_id], bound, replace(estimated[track_id], object_id=object_id),
-            close_duration_s=scheduler.config.timing.gripper_close_s if close_jaws else 0.0,
-            collision_track=collision_tracks[object_id],
-            neighbors=tuple(track for key, track in collision_tracks.items() if key != object_id),
-        )
-        plans.append(CameraPickupPlan(track_id, motion))
-    return tuple(plans)
+
+class CameraPickupPlanner:
+    """Plan ranked pickup alternatives for one fixed simulation snapshot."""
+
+    def __init__(self, simulation, objects, *, close_jaws=True, expected_bindings=None):
+        expected = set(simulation.on_belt_object_ids)
+        if len(objects) != len(expected):
+            raise PandaPlanningError(f"Expected {len(expected)} current camera tracks, got {len(objects)}")
+        self.config = simulation.config
+        self.robot_states = simulation.get_robot_states()
+        robots = robot_configs_from_snapshots(self.robot_states, simulation.get_targets())
+        self.robots = {robot.robot_id: robot for robot in robots}
+        self.scheduler = DeadlineAwareGreedyScheduler()
+        schedule = self.scheduler.schedule(objects, robots, simulation.simulation_time_s)
+        if len(schedule.assigned) != len(objects):
+            reason = schedule.rejected[0].reason if schedule.rejected else "incomplete assignment"
+            raise PandaPlanningError(f"Camera tracks were not fully assigned: {reason}")
+        if len(expected) == 2 and len({item.robot_id for item in schedule.assigned}) != 2:
+            raise PandaPlanningError("Concurrent camera pickup needs one assignment per Panda")
+
+        # Scene IDs are needed for collision checks and attachment. The target
+        # pose, geometry and interception continue to come from the tracker.
+        truth = simulation.get_ground_truth(active_only=True)
+        truth = {key: record for key, record in truth.items() if key in expected}
+        self.bindings = _bind_scene_objects(objects, truth)
+        if expected_bindings is not None and self.bindings != expected_bindings:
+            raise PandaPlanningError("Camera track identities changed before replanning")
+        self.collision_tracks = tracked_states_from_ground_truth(truth)
+        self.objects = {item.object_id: item for item in objects}
+        self.close_duration_s = self.scheduler.config.timing.gripper_close_s if close_jaws else 0.0
+        self.assignments = schedule.assigned
+        self._plans: dict[Assignment, CameraPickupPlan] = {}
+        self._failed: set[Assignment] = set()
+
+    def plan(self, assignments: tuple[Assignment, ...]) -> tuple[CameraPickupPlan, ...]:
+        for assignment in assignments:
+            if assignment in self._plans:
+                continue
+            track_id = assignment.object_id
+            object_id = self.bindings[track_id]
+            bound = replace(assignment, object_id=object_id, grasp=replace(assignment.grasp, object_id=object_id))
+            try:
+                motion = plan_moving_panda(
+                    self.config, self.robot_states[bound.robot_id], bound,
+                    replace(self.objects[track_id].state, object_id=object_id),
+                    close_duration_s=self.close_duration_s, collision_track=self.collision_tracks[object_id],
+                    neighbors=tuple(track for key, track in self.collision_tracks.items() if key != object_id),
+                )
+            except PandaPlanningError:
+                self._failed.add(assignment)
+                raise
+            self._plans[assignment] = CameraPickupPlan(track_id, motion)
+        return tuple(self._plans[assignment] for assignment in assignments)
+
+    def candidate_batches(self):
+        """Start with the schedule, then vary grasp and time within each pick window."""
+        yield self.assignments
+        options = [tuple(self._alternatives(assignment)) for assignment in self.assignments]
+        ranks = product(*(range(len(group)) for group in options))
+        for indices in sorted(ranks, key=lambda choices: (sum(choices), max(choices))):
+            if any(indices):
+                batch = tuple(group[index] for group, index in zip(options, indices))
+                if self._failed.isdisjoint(batch):
+                    yield batch
+
+    def _alternatives(self, assignment):
+        yield assignment
+        model = self.scheduler.model
+        obj = self.objects[assignment.object_id]
+        robot = self.robots[assignment.robot_id]
+        deadline = assignment.deadline_s
+        if assignment.object_exit_time_s is not None:
+            deadline = min(deadline, assignment.object_exit_time_s)
+        velocity, _ = model.predictor.effective_velocity(obj.state)
+
+        # Try the next two orientations first. Also sample two later times
+        # within the same contiguous reach window supplied by the scheduler.
+        for delay in (0.0, 0.12, 0.24):
+            intercept = assignment.intercept_time_s + delay
+            if intercept + self.close_duration_s > deadline + 1e-9:
+                continue
+            centroid = model.predict(obj.object_id, intercept)
+            neighbors = [
+                (other.geometry, model.predict(other.object_id, intercept))
+                for other in self.objects.values()
+                if other.object_id != obj.object_id
+                and (model.exit_time[other.object_id] is None or model.exit_time[other.object_id] >= intercept)
+            ]
+            grasps = select_top_down_grasps(
+                obj.geometry, centroid, neighbors=neighbors, config=self.scheduler.config.gripper,
+                object_velocity_m_s=velocity,
+            ).feasible
+            if delay == 0.0:
+                grasps = tuple(g for g in grasps if g.candidate_id != assignment.grasp.candidate_id)[:2]
+            else:
+                grasps = grasps[:1]
+            for grasp in grasps:
+                travel = model.travel_time(robot.tool_position_m, grasp.position_m)
+                if robot.available_at_s + travel <= intercept + 1e-9:
+                    yield replace(
+                        assignment, intercept_time_s=intercept, intercept_position_m=centroid, grasp=grasp,
+                        travel_time_s=travel, completion_time_s=intercept + model.busy_after_intercept(robot, grasp.position_m),
+                    )

@@ -112,12 +112,13 @@ def trajectory_samples(start, path, durations, max_step_s: float, max_speed_rad_
 
 
 def validate_samples(config, samples, pairs, joint_limits, clearance_m, *, position_scene=None, pair_clearances=None):
-    import robotic as ry
+    import numpy as np
 
-    thresholds = tuple(
-        (first, second, clearance_m if pair_clearances is None else pair_clearances.get(frozenset((first, second)), clearance_m))
-        for first, second in pairs
-    )
+    from .clearance import PairDistances
+
+    distances = PairDistances(config, pairs)
+    allowances = pair_clearances or {}
+    thresholds = np.array([allowances.get(frozenset(pair), clearance_m) for pair in pairs])
     closest = (float("inf"), pairs[0])
     for sample in samples:
         if position_scene is not None:
@@ -125,14 +126,14 @@ def validate_samples(config, samples, pairs, joint_limits, clearance_m, *, posit
         if any(not lower - 1e-8 <= q <= upper + 1e-8 for q, (lower, upper) in zip(sample.positions_rad, joint_limits)):
             raise PandaPlanningError(f"Joint limits violated at {sample.elapsed_s:.3f} s")
         config.setJointState(sample.positions_rad)
-        for first, second, limit in thresholds:
-            distance = -float(config.eval(ry.FS.negDistance, [first, second])[0][0])
-            if not isfinite(distance) or distance < limit:
+        for index, distance in distances.candidate_distances(np.maximum(thresholds, closest[0])):
+            if not isfinite(distance) or distance < thresholds[index]:
+                first, second = pairs[index]
                 raise PandaPlanningError(
                     f"Insufficient clearance between {first} and {second} at {sample.elapsed_s:.3f} s"
                 )
             if distance < closest[0]:
-                closest = distance, (first, second)
+                closest = distance, pairs[index]
     return closest
 
 

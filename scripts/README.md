@@ -156,14 +156,20 @@ Add `--perception` to prepare the concurrent batch from live RAI RGB-D and
 Kalman tracks. The camera confirms the two separated objects over 0.50 s and
 continues sampling at 5 Hz while the arms approach. Sampling stops when the
 first arm starts to descend, where the grippers can occlude the objects.
+The controller allows up to two missed frames while the original track ID
+can still be recovered. Replanning waits for fresh measurements of both
+original tracks. A third missed frame or a track still missing at the descent
+checkpoint stops the batch before either arm descends.
 Track estimates drive assignment and TCP targets. The simulator binds track
 IDs to scene frames, validates both pad distances, and checks both trajectories
 together. If two consecutive measurements move a predicted interception point
 by more than 5 mm, motion holds at the current approach pose while KOMO builds
 and validates a replacement timeline from both current joint states. Playback
-resumes only after validation succeeds. The simulation clock stays fixed during
-this calculation. The camera mode requires the `perception` extra and an
-OpenGL/X11 display, including with `--no-view`.
+resumes only after validation succeeds. If the first replacement is rejected,
+the controller tries up to six alternatives using ranked grasp angles and
+nearby later times inside the scheduled pick windows. The simulation clock
+stays fixed during these attempts. The camera mode requires the `perception`
+extra and an OpenGL/X11 display, including with `--no-view`.
 
 The default layout can demonstrate feedback with a speed change at 0.75 s. The
 controller compensates the RGB-D tracks for the commanded belt motion.
@@ -171,3 +177,18 @@ controller compensates the RGB-D tracks for the commanded belt motion.
 ```bash
 .venv/bin/python scripts/dual_panda_demo.py --perception --change-speed-to 0.025
 ```
+
+## Incoming product stream
+
+Run `.venv/bin/python scripts/dual_panda_demo.py --stream` to see four products
+advance from a compact, covered feeder onto the main belt in one run.
+Queued products enter beneath the cover and slide out onto the short infeed.
+The viewer keeps the final scene when the queue finishes.
+Add `--no-view` for a single terminal result or `--objects` to change the
+initial queue size. This mode uses the `perception` extra and OpenGL/X11.
+
+RGB-D tracks identify each arriving product. A prioritizes boxes and B
+prioritizes cylinders. When the preferred arm cannot make the pick window,
+the scheduler can assign the other arm, which uses its own bin. The arms
+reserve separate jobs and place products in free bin positions. A preview
+with successive camera frames validates the shared motions before playback.

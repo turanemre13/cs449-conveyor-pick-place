@@ -2,9 +2,11 @@
 
 from bisect import bisect_right
 from dataclasses import dataclass
+from itertools import islice
 from math import dist, isfinite
 from typing import Callable
 
+from conveyor.planning.clearance import PairDistances
 from conveyor.planning.moving_panda import plan_moving_panda
 from conveyor.planning.panda import PandaPlanningError, moving_collision_pairs
 from conveyor.planning.panda_placement import require_object_in_bin
@@ -16,7 +18,7 @@ from conveyor.simulation import ConveyorSimulation
 
 from .panda_pickup import attach_belt_object, execute_panda_pickup
 from .panda_placement import execute_panda_placement, release_into_bin
-from .rgbd_panda import CameraPickupPlan, ConveyorCameraTracker, plan_camera_pickups, plan_tracked_pickups
+from .rgbd_panda import CameraPickupPlan, CameraPickupPlanner, ConveyorCameraTracker, plan_camera_pickups
 from .serial_pandas import PandaJobResult, execute_serial_pandas
 
 
@@ -40,6 +42,7 @@ class PreparedPandaBatch:
     start_scene: tuple
     overlap_s: float
     camera_plans: tuple[CameraPickupPlan, ...] = ()
+    candidate_retries: int = 0
 
 
 @dataclass(frozen=True)
@@ -47,10 +50,14 @@ class CameraBatchPlayback:
     jobs: tuple[PandaJobResult, ...]
     camera_frames: int
     replanned_at_s: tuple[float, ...]
+    candidate_retries: int = 0
 
 
 _PREDICTOR = ConstantVelocityPredictor(planar_motion=True, max_horizon_s=60.0)
 _REPLAN_POSITION_TOLERANCE_M = 0.005
+_APPROACH_CAMERA_PERIOD_S = 0.20
+_MAX_MISSED_APPROACH_FRAMES = 2
+_MAX_REPLACEMENT_RETRIES = 6
 
 
 def _pair_names(config):
@@ -160,8 +167,9 @@ def _interpolate(times, commands, now):
     return ArmCommand(joints, finger)
 
 
-def _merge_streams(streams, jobs):
+def _merge_streams(streams, jobs, extra_times=()):
     times = {time for stream in streams.values() for time in stream}
+    times.update(extra_times)
     times.update(round(time, 9) for job in jobs for time in (job.pickup_time_s, job.placement.release_time_s))
     segments = [tuple(zip(*sorted(stream.items()))) for stream in streams.values()]
     frames = []
@@ -194,13 +202,12 @@ def _clearance_limits(targets, jobs, now):
     return limits
 
 
-def _validate_clearance(scene, pairs, targets, jobs, now):
-    import robotic as ry
-
-    limits = _clearance_limits(targets, jobs, now)
-    for first, second in pairs:
-        separation = -float(scene.config.eval(ry.FS.negDistance, [first, second])[0][0])
-        if not isfinite(separation) or separation < limits.get(frozenset((first, second)), 0.005):
+def _validate_clearance(distances, targets, jobs, now):
+    allowances = _clearance_limits(targets, jobs, now)
+    limits = [allowances.get(pair, 0.005) for pair in distances.pair_keys]
+    for index, separation in distances.candidate_distances(limits):
+        if not isfinite(separation) or separation < limits[index]:
+            first, second = distances.pairs[index]
             raise PandaPlanningError(f"Combined clearance failed at {now:.3f} s: {first} / {second}")
 
 
@@ -214,14 +221,15 @@ def _play(scene, batch, *, check_clearance=False, after_step=None):
     for job in batch.jobs:
         events.setdefault(round(job.pickup_time_s, 9), []).append((job, True))
         events.setdefault(round(job.placement.release_time_s, 9), []).append((job, False))
-    pairs = ()
+    distances = None
     previous_topology = ()
     previous = scene.simulation_time_s
 
-    def current_pairs():
-        return tuple(dict.fromkeys(
+    def current_distances():
+        pairs = dict.fromkeys(
             pair for robot in robot_states for pair in moving_collision_pairs(config, robot.arm_joint_names[0])
-        ))
+        )
+        return PairDistances(config, pairs)
 
     for frame in batch.frames:
         if frame.time_s > previous + 1e-10:
@@ -233,15 +241,15 @@ def _play(scene, batch, *, check_clearance=False, after_step=None):
         due = events.get(frame.time_s, ())
         if check_clearance:
             topology = scene.active_object_ids
-            if not pairs or topology != previous_topology:
-                pairs = current_pairs()
+            if distances is None or topology != previous_topology:
+                distances = current_distances()
                 previous_topology = topology
-            _validate_clearance(scene, pairs, targets, batch.jobs, frame.time_s)
+            _validate_clearance(distances, targets, batch.jobs, frame.time_s)
         for job, picking in due:
             _apply_event(scene, robots[job.robot_id], job, picking, targets)
         if check_clearance and due:
-            pairs = current_pairs()
-            _validate_clearance(scene, pairs, targets, batch.jobs, frame.time_s)
+            distances = current_distances()
+            _validate_clearance(distances, targets, batch.jobs, frame.time_s)
         if after_step is not None and not after_step(frame.time_s):
             return False
     for job in batch.jobs:
@@ -268,36 +276,52 @@ def _prepare_panda_batch(
     def restore_scene():
         _restore_preview(preview, simulation)
 
-    try:
-        if tracks is not None:
-            restore_scene()
-        if _start_scene(preview) != start:
-            raise ValueError("The live scene differs from the reproducible preview")
+    def build_batch(camera_plans=(), *, retries=0):
         streams = {robot_id: {} for robot_id in preview.get_robot_states()}
         _record(preview, streams, streams, simulation.simulation_time_s)
-        camera_plans = ()
         if serial:
             jobs = _record_serial(preview, streams)
         else:
-            if tracks is not None:
-                camera_plans = plan_tracked_pickups(preview, tracks, expected_bindings=bindings)
-            elif perception:
-                camera_plans = plan_camera_pickups(preview)
-                # Include the timestamps used to confirm tracks in the preview.
-                for step in range(1, 51):
-                    _record(preview, streams, streams, step * 0.01)
             if perception:
                 if len(camera_plans) != 2:
                     raise PandaPlanningError("The concurrent camera demo needs exactly two pickup plans")
+                if tracks is None:
+                    # Include the timestamps used to confirm the initial tracks.
+                    for step in range(1, 51):
+                        _record(preview, streams, streams, step * 0.01)
                 plans = [(record.track_id, record.motion) for record in camera_plans]
             else:
                 plans = _ground_truth_plans(preview)
             jobs = _record_concurrent(preview, streams, plans, restore_scene)
         frames, overlap = _merge_streams(streams, jobs)
-        batch = PreparedPandaBatch(tuple(streams), frames, jobs, start, overlap, camera_plans)
+        batch = PreparedPandaBatch(tuple(streams), frames, jobs, start, overlap, camera_plans, retries)
         restore_scene()
         _play(preview, batch, check_clearance=True)
         return batch
+
+    try:
+        if tracks is not None:
+            restore_scene()
+        if _start_scene(preview) != start:
+            raise ValueError("The live scene differs from the reproducible preview")
+        if tracks is None:
+            return build_batch(plan_camera_pickups(preview) if perception else ())
+
+        planner = CameraPickupPlanner(preview, tracks, expected_bindings=bindings)
+        attempts = islice(planner.candidate_batches(), 1 + _MAX_REPLACEMENT_RETRIES)
+        first_failure = None
+        for attempt, assignments in enumerate(attempts):
+            restore_scene()
+            try:
+                return build_batch(planner.plan(assignments), retries=attempt)
+            except PandaPlanningError as exc:
+                if first_failure is None:
+                    first_failure = str(exc)
+                last_failure = str(exc)
+        raise PandaPlanningError(
+            f"No validated replacement after {attempt + 1} attempts. "
+            f"First failure: {first_failure}. Last failure: {last_failure}"
+        )
     finally:
         preview.close()
 
@@ -321,6 +345,7 @@ def play_camera_panda_batch(
     camera_frames = 0
     next_capture_s = 0.0
     replanned = []
+    candidate_retries = 0
     belt_offset_m = 0.0
     previous_time_s = None
     previous_speed_m_s = simulation.belt_speed_m_s
@@ -330,10 +355,12 @@ def play_camera_panda_batch(
         planned_at_s = max(plan.planned_at_s for plan in plans.values())
         cutoff_s = min(plan.descent_start_s for plan in plans.values())
         drift_counts = dict.fromkeys(plans, 0)
+        missed_counts = dict.fromkeys(plans, 0)
         replacement_tracks = None
+        approach_confirmed = False
 
         def observe(now):
-            nonlocal camera_frames, next_capture_s, replacement_tracks
+            nonlocal camera_frames, next_capture_s, replacement_tracks, approach_confirmed
             nonlocal belt_offset_m, previous_time_s, previous_speed_m_s
             if now == previous_time_s:
                 return True  # A replacement starts at the frame already applied.
@@ -343,30 +370,48 @@ def play_camera_panda_batch(
             if after_step is not None and not after_step(now):
                 return False
             previous_speed_m_s = simulation.belt_speed_m_s
-            if now >= cutoff_s or now + 1e-9 < next_capture_s:
+            if approach_confirmed:
                 return True
-            next_capture_s += 0.05 if next_capture_s < 0.5 - 1e-9 else 0.20
+
+            # The first pregrasp pose is on the playback grid. Allow for the
+            # timestamp rounding used when combining the two arm streams.
+            at_descent = now + 1e-8 >= cutoff_s
+            capture_due = now + 1e-9 >= next_capture_s
+            if not capture_due and not (at_descent and any(missed_counts.values())):
+                approach_confirmed = at_descent
+                return True
+            if capture_due:
+                next_capture_s += 0.05 if next_capture_s < 0.5 - 1e-9 else _APPROACH_CAMERA_PERIOD_S
             camera_frames += 1
             observed = {record.object_id: record for record in camera.observe(simulation, belt_offset_m=belt_offset_m)
                         if record.object_id in plans}
-            if now <= planned_at_s + 1e-9:
+            if now + 1e-9 < planned_at_s:
                 return True
             for track_id, plan in plans.items():
                 track = observed.get(track_id)
-                deviates = track is not None and dist(
+                if track is None:
+                    missed_counts[track_id] += 1
+                    continue
+                missed_counts[track_id] = 0
+                deviates = dist(
                     _PREDICTOR.predict(track.state, plan.intercept_time_s).position_m,
                     plan.object_position_at(plan.intercept_time_s),
                 ) > _REPLAN_POSITION_TOLERANCE_M
                 drift_counts[track_id] = drift_counts[track_id] + 1 if deviates else 0
-            if max(drift_counts.values()) < 2:
+            missing = plans.keys() - observed.keys()
+            if missing:
+                if at_descent or any(missed_counts[track_id] > _MAX_MISSED_APPROACH_FRAMES for track_id in missing):
+                    detail = ", ".join(sorted(missing))
+                    raise PandaPlanningError(f"Camera tracks lost before descent at {now:.3f} s: {detail}")
                 return True
-            if observed.keys() != plans.keys():
-                raise PandaPlanningError("A camera track is missing at the replanning checkpoint")
+            if max(drift_counts.values()) < 2:
+                approach_confirmed = at_descent
+                return True
             replacement_tracks = list(observed.values())
             return False
 
         if _play(simulation, batch, check_clearance=True, after_step=observe):
-            return CameraBatchPlayback(batch.jobs, camera_frames, tuple(replanned))
+            return CameraBatchPlayback(batch.jobs, camera_frames, tuple(replanned), candidate_retries)
         if replacement_tracks is None:
             return None
         now = simulation.simulation_time_s
@@ -377,5 +422,6 @@ def play_camera_panda_batch(
             bindings={track_id: plan.object_id for track_id, plan in plans.items()},
         )
         replanned.append(now)
+        candidate_retries += batch.candidate_retries
         if on_replanning is not None:
             on_replanning(now, False)

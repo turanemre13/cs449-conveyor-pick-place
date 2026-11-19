@@ -13,6 +13,7 @@ EDGE_MARGIN_M = .005
 OBJECT_CLEARANCE_M = .008
 ORDERED_MIN_GAP_M = .10
 MAX_OBJECT_COUNT = 24
+FEED_SPACING_M = 1.18
 
 _COLORS = (
     (.90, .32, .12), (.16, .57, .88), (.91, .72, .12),
@@ -99,15 +100,15 @@ def footprints_overlap(first: ObjectSpec, second: ObjectSpec, clearance_m: float
 
 
 def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 8) -> tuple[ObjectSpec, ...]:
-    """Generate single, ordered, sparse, or clutter layouts with stable IDs.
+    """Generate seeded layouts with stable IDs, including an upstream feed.
 
     ``single`` always returns the original one-box baseline. Other presets honor
     counts from 1 to 24, subject to available space. ``ordered`` places a single
     file in ascending ID/x order with at least 10 cm between longitudinal
     footprints. Layout generation never changes global random state.
     """
-    if name not in ("single", "ordered", "sparse", "clutter"):
-        raise ValueError("scenario must be single, ordered, sparse, or clutter")
+    if name not in ("single", "ordered", "sparse", "clutter", "feed"):
+        raise ValueError("scenario must be single, ordered, sparse, clutter, or feed")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     if isinstance(object_count, bool) or not isinstance(object_count, int) or not 1 <= object_count <= MAX_OBJECT_COUNT:
@@ -116,6 +117,8 @@ def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 
         return (ObjectSpec("object_001", "box", (.06, .045, .08), (-1.05, 0.0, .79), 0.0, _COLORS[0]),)
 
     rng = random.Random(seed)
+    if name == "feed":
+        return _feed_layout(rng, object_count)
     if name == "ordered":
         return _ordered_layout(rng, object_count)
     placed: list[ObjectSpec] = []
@@ -153,6 +156,28 @@ def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 
         selected = min(candidates, key=lambda item: item[0]) if name == "clutter" else max(candidates, key=lambda item: item[0])
         placed.append(selected[1])
     return tuple(placed)
+
+
+def _feed_layout(rng: random.Random, object_count: int) -> tuple[ObjectSpec, ...]:
+    """Queue mixed products on the upstream deck before any enter the main belt."""
+    products = []
+    for index in range(object_count):
+        geometry = "box" if index % 2 == 0 else "cylinder"
+        if index < 2:
+            width = rng.uniform(.049, .054)
+            depth = rng.uniform(.039, .044) if geometry == "box" else width
+            height = rng.uniform(.064, .077)
+            yaw = rng.uniform(-.15, .15) if geometry == "box" else 0.0
+            dimensions = (width, depth, height)
+        else:
+            template = products[index % 2]
+            dimensions, yaw = template.dimensions_m, template.yaw_rad
+        x = -BELT_LENGTH_M / 2 - .12 - index * FEED_SPACING_M
+        products.append(ObjectSpec(
+            f"object_{index + 1:03d}", geometry, dimensions,
+            (x, -.025, BELT_TOP_M + dimensions[2] / 2), yaw, _COLORS[index % len(_COLORS)],
+        ))
+    return tuple(products)
 
 
 def _ordered_layout(rng: random.Random, object_count: int) -> tuple[ObjectSpec, ...]:

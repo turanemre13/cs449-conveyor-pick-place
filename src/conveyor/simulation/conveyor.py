@@ -1,5 +1,6 @@
 """Seeded kinematic transport with optional native dynamics after the exit."""
 
+from copy import copy
 from dataclasses import dataclass
 from math import cos, isfinite, pi, sin
 from numbers import Real
@@ -79,6 +80,9 @@ class ConveyorSimulation:
         # Paint-like visual strips: no collision or force generation.
         import robotic as ry
 
+        if scenario == "feed":
+            self._add_infeed()
+
         for index in range(32):
             seam = self.config.addFrame(f"belt_seam_{index:02d}")
             seam.setShape(ry.ST.box, [.006, self._width - .01, .0002])
@@ -86,6 +90,74 @@ class ConveyorSimulation:
             self._seams.append(seam)
         del seam
         self._restore_objects(specs)
+
+    def _add_infeed(self) -> None:
+        import robotic as ry
+
+        entry = self._belt_center[0] - self._length / 2
+        upstream = entry - .56
+        self._infeed_release_x = upstream + .06
+        center = (entry + upstream) / 2
+        y = self._belt_center[1]
+        top = self._belt_center[2] + self._height / 2
+        self.config.addFrame("conveyor_infeed", "world").setShape(
+            ry.ST.ssBox, [entry - upstream, self._width, self._height, .005],
+        ).setPosition([center, y, self._belt_center[2]]).setColor([.13, .18, .20]).setContact(1)
+        self.config.addFrame("conveyor_infeed_support", "world").setShape(
+            ry.ST.ssBox, [.07, .36, .67, .004],
+        ).setPosition([center, y, .335]).setColor([.37, .42, .46]).setContact(0)
+
+        # Products enter under an opaque cover and travel out of its open end.
+        hood_length, hood_height = .28, .14
+        hood_x = upstream + hood_length / 2
+        hood_color = [.26, .34, .38]
+        panels = (
+            ("cover", [hood_length, self._width + .03, .025], [hood_x, y, top + hood_height]),
+            ("rear", [.02, self._width + .03, hood_height], [upstream, y, top + hood_height / 2]),
+            ("near", [hood_length, .02, hood_height], [hood_x, y - self._width / 2, top + hood_height / 2]),
+            ("far", [hood_length, .02, hood_height], [hood_x, y + self._width / 2, top + hood_height / 2]),
+        )
+        for name, size, position in panels:
+            self.config.addFrame(f"conveyor_infeed_{name}", "world").setShape(
+                ry.ST.ssBox, [*size, .004],
+            ).setPosition(position).setColor(hood_color).setContact(0)
+
+        # The stream needs room for more than one product per destination.
+        for name in ("target_bin_a", "target_bin_b"):
+            root = self.config.getFrame(name)
+            root.setAttributes({**root.getAttributes(), "inner_size_m": [.46, .30, .14]})
+            self.config.getFrame(f"{name}_bottom").setShape(ry.ST.ssBox, [.484, .324, .015, .003])
+            for side, x in (("left", -.236), ("right", .236)):
+                self.config.getFrame(f"{name}_wall_{side}").setShape(
+                    ry.ST.ssBox, [.012, .324, .14, .003],
+                ).setRelativePosition([x, 0.0, .07])
+            for side, y in (("near", -.156), ("far", .156)):
+                self.config.getFrame(f"{name}_wall_{side}").setShape(
+                    ry.ST.ssBox, [.46, .012, .14, .003],
+                ).setRelativePosition([0.0, y, .07])
+
+    def copy_for_planning(self) -> "ConveyorSimulation":
+        """Copy a kinematic scene at its current time, including attachments."""
+        self._require_open()
+        if self.exit_mode != "remove":
+            raise ValueError("Planning copies require remove-at-exit mode")
+        import robotic as ry
+
+        result = copy(self)
+        result.config = ry.Config()
+        anchor = "_conveyor_copy_anchor"
+        while anchor in self.config.getFrameNames():
+            anchor += "_"
+        result.config.addFrame(anchor)
+        result.config.addConfigurationCopy(self.config)
+        result.config.delFrame(anchor)
+        result._seams = [result.config.getFrame(frame.name) for frame in self._seams]
+        result._motion_states = self._motion_states.copy()
+        result._exit_records = self._exit_records.copy()
+        result._exit_times = self._exit_times.copy()
+        result._camera = None
+        result._viewer = None
+        return result
 
     @property
     def object_at_exit(self) -> bool:
@@ -98,7 +170,11 @@ class ConveyorSimulation:
 
     @property
     def active_object_ids(self) -> tuple[str, ...]:
-        return tuple(key for key in self.object_ids if self._motion_states[key] != "exited")
+        return tuple(key for key in self.object_ids if self._motion_states[key] not in ("queued", "exited"))
+
+    @property
+    def queued_object_ids(self) -> tuple[str, ...]:
+        return tuple(key for key in self.object_ids if self._motion_states[key] == "queued")
 
     @property
     def on_belt_object_ids(self) -> tuple[str, ...]:
@@ -137,21 +213,35 @@ class ConveyorSimulation:
         self.config.setJointState(self._initial_joints)
         for name, coordinates in self._initial_finger_states.items():
             self.config.getFrame(name).setJointState(coordinates)
-        import robotic as ry
-
         for spec in specs:
             frame = self.config.addFrame(spec.object_id)
-            if spec.geometry_type == "box":
-                frame.setShape(ry.ST.ssBox, [*spec.dimensions_m, .005])
+            if self.scenario == "feed" and spec.position_m[0] < self._infeed_release_x:
+                self._motion_states[spec.object_id] = "queued"
             else:
-                frame.setShape(ry.ST.cylinder, [spec.dimensions_m[2], spec.dimensions_m[0] / 2])
+                self._set_product_shape(frame, spec)
             frame.setPosition(list(spec.position_m))
             frame.setQuaternion([cos(spec.yaw_rad / 2), 0, 0, sin(spec.yaw_rad / 2)])
-            frame.setColor(list(spec.color_rgb)).setContact(1).setMass(.12)
         del frame
         self._rebuild_native_caches()
         self._update_seams()
         self._refresh_collision_proxies()
+
+    @staticmethod
+    def _set_product_shape(frame, spec: ObjectSpec) -> None:
+        import robotic as ry
+
+        if spec.geometry_type == "box":
+            frame.setShape(ry.ST.ssBox, [*spec.dimensions_m, .005])
+        else:
+            frame.setShape(ry.ST.cylinder, [spec.dimensions_m[2], spec.dimensions_m[0] / 2])
+        frame.setColor(list(spec.color_rgb)).setContact(1).setMass(.12)
+
+    def _activate_queued_product(self, frame, spec: ObjectSpec, x: float) -> bool:
+        if self._motion_states[spec.object_id] != "queued" or x < self._infeed_release_x:
+            return False
+        self._set_product_shape(frame, spec)
+        self._motion_states[spec.object_id] = "on_belt"
+        return True
 
     def step(self, dt: float) -> None:
         """Advance simulation time by dt seconds; independent of wall-clock time."""
@@ -169,11 +259,12 @@ class ConveyorSimulation:
         topology_changed = False
         for spec in self.object_specs:
             key = spec.object_id
-            if self._motion_states[key] != "on_belt":
+            if self._motion_states[key] not in ("on_belt", "queued"):
                 continue
             frame = self.config.getFrame(key)
             position = frame.getPosition()
             next_x = float(position[0]) + self.belt_speed_m_s * float(dt)
+            topology_changed |= self._activate_queued_product(frame, spec, next_x)
             exit_x = self._belt_center[0] + self._length / 2 - planar_half_extents(spec)[0]
             if next_x >= exit_x and self.belt_speed_m_s > 0:
                 exit_time = previous_time + max(0.0, exit_x - float(position[0])) / self.belt_speed_m_s
@@ -222,13 +313,18 @@ class ConveyorSimulation:
                         step_s = min(step_s, distance / self.belt_speed_m_s)
             if self._falling is not None:
                 self._falling.step(step_s)
-            for key in self.on_belt_object_ids:
-                frame = self.config.getFrame(key)
+            topology_changed = False
+            for spec in self.object_specs:
+                if self._motion_states[spec.object_id] not in ("on_belt", "queued"):
+                    continue
+                frame = self.config.getFrame(spec.object_id)
                 position = frame.getPosition()
-                frame.setPosition([
-                    float(position[0]) + self.belt_speed_m_s * step_s,
-                    float(position[1]), float(position[2]),
-                ])
+                x = float(position[0]) + self.belt_speed_m_s * step_s
+                frame.setPosition([x, float(position[1]), float(position[2])])
+                topology_changed |= self._activate_queued_product(frame, spec, x)
+            if topology_changed:
+                frame = None
+                self._rebuild_native_caches()
             self.simulation_time_s = min(target_time, self.simulation_time_s + step_s)
             if self._falling is not None:
                 for key in self.fallen_object_ids:
@@ -241,6 +337,8 @@ class ConveyorSimulation:
             raise KeyError(object_id)
         if self._motion_states[object_id] == "exited":
             raise ValueError(f"Object has already exited: {object_id}")
+        if self._motion_states[object_id] == "queued":
+            raise ValueError(f"Object is still queued in the feeder: {object_id}")
         if self._motion_states[object_id] in ("falling", "settled"):
             self._falling.remove_object(object_id)
         self._motion_states[object_id] = "released"
@@ -249,26 +347,27 @@ class ConveyorSimulation:
         """Current states plus optional historical terminal records for exits.
 
         Exited records retain their actual exit timestamp and terminal pose.
-        Use active_only=True for live states matching a camera observation.
+        Queued positions describe when products will reach the covered feeder.
+        Use active_only=True for the objects with visible geometry in the scene.
         """
         if self._closed:
             return {
                 key: state for key, state in self._closed_ground_truth.items()
-                if not active_only or state.motion_state != "exited"
+                if not active_only or state.motion_state not in ("queued", "exited")
             }
         result = {}
         for spec in self.object_specs:
             if self._motion_states[spec.object_id] == "exited":
                 if not active_only:
                     result[spec.object_id] = self._exit_records[spec.object_id]
-            else:
+            elif not active_only or self._motion_states[spec.object_id] != "queued":
                 result[spec.object_id] = self._snapshot(spec, self.simulation_time_s)
         return result
 
     def _snapshot(self, spec: ObjectSpec, time_s: float, exit_time: float | None = None) -> ObjectGroundTruth:
         frame = self.config.getFrame(spec.object_id)
         state = self._motion_states[spec.object_id]
-        velocity = self.belt_speed_m_s if state == "on_belt" else 0.0
+        velocity = self.belt_speed_m_s if state in ("on_belt", "queued") else 0.0
         linear_velocity = None if state == "released" else (velocity, 0.0, 0.0)
         if state in ("falling", "settled"):
             linear_velocity = self._falling.get_velocity(spec.object_id)
