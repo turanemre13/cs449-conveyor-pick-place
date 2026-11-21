@@ -14,6 +14,12 @@ OBJECT_CLEARANCE_M = .008
 ORDERED_MIN_GAP_M = .10
 MAX_OBJECT_COUNT = 24
 FEED_SPACING_M = 1.18
+SHOWCASE_FEED = (
+    (0.00, "box"), (1.18, "cylinder"), (2.36, "box"), (3.54, "cylinder"),
+    (4.12, "sphere"),
+    (4.64, "box"), (4.82, "box"), (5.18, "box"),
+    (5.72, "sphere"),
+)
 
 _COLORS = (
     (.90, .32, .12), (.16, .57, .88), (.91, .72, .12),
@@ -42,8 +48,8 @@ class ObjectSpec:
     def __post_init__(self) -> None:
         if not isinstance(self.object_id, str) or not self.object_id.strip():
             raise ValueError("object_id must be a nonblank string")
-        if self.geometry_type not in ("box", "cylinder"):
-            raise ValueError("geometry_type must be box or cylinder")
+        if self.geometry_type not in ("box", "cylinder", "sphere"):
+            raise ValueError("geometry_type must be box, cylinder, or sphere")
         _finite_tuple("dimensions_m", self.dimensions_m, 3)
         _finite_tuple("position_m", self.position_m, 3)
         _finite_tuple("color_rgb", self.color_rgb, 3)
@@ -55,12 +61,14 @@ class ObjectSpec:
             raise ValueError("yaw_rad must be a finite real number")
         if self.geometry_type == "cylinder" and self.dimensions_m[0] != self.dimensions_m[1]:
             raise ValueError("Cylinder x/y dimensions must both equal its diameter")
+        if self.geometry_type == "sphere" and len(set(self.dimensions_m)) != 1:
+            raise ValueError("Sphere dimensions must all equal its diameter")
 
 
 def planar_half_extents(spec: ObjectSpec) -> tuple[float, float]:
     """World-axis half extents of the rotated footprint, in metres."""
     dx, dy, _ = spec.dimensions_m
-    if spec.geometry_type == "cylinder":
+    if spec.geometry_type != "box":
         return dx / 2, dx / 2
     c, s = abs(cos(spec.yaw_rad)), abs(sin(spec.yaw_rad))
     return (c * dx + s * dy) / 2, (s * dx + c * dy) / 2
@@ -76,10 +84,12 @@ def footprints_overlap(first: ObjectSpec, second: ObjectSpec, clearance_m: float
     if isinstance(clearance_m, bool) or not isinstance(clearance_m, Real) or not isfinite(clearance_m) or clearance_m < 0:
         raise ValueError("clearance_m must be finite and non-negative")
     delta = tuple(second.position_m[i] - first.position_m[i] for i in (0, 1))
-    if first.geometry_type == second.geometry_type == "cylinder":
+    first_round = first.geometry_type != "box"
+    second_round = second.geometry_type != "box"
+    if first_round and second_round:
         radii = (first.dimensions_m[0] + second.dimensions_m[0]) / 2
         return hypot(*delta) < radii + clearance_m - 1e-12
-    if first.geometry_type != second.geometry_type:
+    if first_round != second_round:
         box, circle = (first, second) if first.geometry_type == "box" else (second, first)
         dx, dy = (circle.position_m[i] - box.position_m[i] for i in (0, 1))
         c, s = cos(box.yaw_rad), sin(box.yaw_rad)
@@ -107,8 +117,8 @@ def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 
     file in ascending ID/x order with at least 10 cm between longitudinal
     footprints. Layout generation never changes global random state.
     """
-    if name not in ("single", "ordered", "sparse", "clutter", "feed"):
-        raise ValueError("scenario must be single, ordered, sparse, clutter, or feed")
+    if name not in ("single", "ordered", "sparse", "clutter", "feed", "showcase"):
+        raise ValueError("scenario must be single, ordered, sparse, clutter, feed, or showcase")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise ValueError("seed must be an integer")
     if isinstance(object_count, bool) or not isinstance(object_count, int) or not 1 <= object_count <= MAX_OBJECT_COUNT:
@@ -117,8 +127,8 @@ def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 
         return (ObjectSpec("object_001", "box", (.06, .045, .08), (-1.05, 0.0, .79), 0.0, _COLORS[0]),)
 
     rng = random.Random(seed)
-    if name == "feed":
-        return _feed_layout(rng, object_count)
+    if name in ("feed", "showcase"):
+        return _feed_layout(rng, object_count, showcase=name == "showcase")
     if name == "ordered":
         return _ordered_layout(rng, object_count)
     placed: list[ObjectSpec] = []
@@ -158,24 +168,32 @@ def generate_scenario(name: str = "clutter", seed: int = 7, object_count: int = 
     return tuple(placed)
 
 
-def _feed_layout(rng: random.Random, object_count: int) -> tuple[ObjectSpec, ...]:
+def _feed_layout(rng: random.Random, object_count: int, *, showcase: bool) -> tuple[ObjectSpec, ...]:
     """Queue mixed products on the upstream deck before any enter the main belt."""
     products = []
     for index in range(object_count):
-        geometry = "box" if index % 2 == 0 else "cylinder"
-        if index < 2:
+        if showcase:
+            cycle, phase = divmod(index, len(SHOWCASE_FEED))
+            distance, geometry = SHOWCASE_FEED[phase]
+            distance += cycle * (SHOWCASE_FEED[-1][0] + FEED_SPACING_M)
+        else:
+            distance, geometry = index * FEED_SPACING_M, "box" if index % 2 == 0 else "cylinder"
+        if geometry == "sphere":
+            dimensions, yaw = (.070, .070, .070), 0.0
+        elif index < 2:
             width = rng.uniform(.049, .054)
             depth = rng.uniform(.039, .044) if geometry == "box" else width
             height = rng.uniform(.064, .077)
             yaw = rng.uniform(-.15, .15) if geometry == "box" else 0.0
             dimensions = (width, depth, height)
         else:
-            template = products[index % 2]
+            template = products[0 if geometry == "box" else 1]
             dimensions, yaw = template.dimensions_m, template.yaw_rad
-        x = -BELT_LENGTH_M / 2 - .12 - index * FEED_SPACING_M
+        x = -BELT_LENGTH_M / 2 - .12 - distance
+        color = (.65, .22, .79) if geometry == "sphere" else _COLORS[index % len(_COLORS)]
         products.append(ObjectSpec(
             f"object_{index + 1:03d}", geometry, dimensions,
-            (x, -.025, BELT_TOP_M + dimensions[2] / 2), yaw, _COLORS[index % len(_COLORS)],
+            (x, -.025, BELT_TOP_M + dimensions[2] / 2), yaw, color,
         ))
     return tuple(products)
 

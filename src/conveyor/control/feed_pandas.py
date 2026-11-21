@@ -1,6 +1,7 @@
 """Classify a moving product feed and prepare a checked sorting run."""
 
 from dataclasses import dataclass, replace
+from math import ceil
 
 from conveyor.grasping import select_top_down_grasps
 from conveyor.planning.moving_panda import plan_moving_panda
@@ -9,6 +10,7 @@ from conveyor.planning.static_panda import plan_static_panda
 from conveyor.prediction import tracked_states_from_ground_truth
 from conveyor.scheduling import DeadlineAwareGreedyScheduler, robot_configs_from_snapshots
 from conveyor.simulation import ConveyorSimulation
+from conveyor.simulation.scenarios import planar_half_extents
 
 from .dual_pandas import (
     PlaybackFrame, PreparedPandaBatch, _interpolate, _merge_streams, _play, _preview_scene, _record, _start_scene,
@@ -30,6 +32,7 @@ _PREFERRED_START_MARGIN_S = 0.50
 class FeedRun:
     batch: PreparedPandaBatch
     missed: tuple[tuple[str, str], ...]
+    collected: tuple[str, ...] = ()
 
 
 def _pickup_alternatives(assignment, track, model):
@@ -203,8 +206,8 @@ def _advance(scene, batch, stop_s):
 
 def prepare_feed_run(simulation: ConveyorSimulation) -> FeedRun:
     """Use successive RGB-D observations to compile one finite feed without resetting it."""
-    if simulation.scenario != "feed" or simulation.exit_mode != "remove" or simulation.simulation_time_s != 0.0:
-        raise ValueError("Feed sorting requires a fresh feed scenario with remove-at-exit mode")
+    if simulation.scenario not in ("feed", "showcase") or simulation.simulation_time_s != 0.0:
+        raise ValueError("Feed sorting requires a fresh feed or showcase scenario")
     if simulation.belt_speed_m_s <= 0.0:
         raise ValueError("Feed sorting requires a positive belt speed")
 
@@ -213,6 +216,9 @@ def prepare_feed_run(simulation: ConveyorSimulation) -> FeedRun:
     try:
         if _start_scene(preview) != start:
             raise ValueError("The live feed differs from its reproducible preview")
+        # RAI's PhysX engine cannot safely coexist with engines in planning copies.
+        # Use kinematic copies for candidate searches and run physical validation once.
+        preview.exit_mode = "remove"
         streams = {robot_id: {} for robot_id in preview.get_robot_states()}
         ready = {key: TcpPose(robot.gripper_position_m, robot.gripper_quaternion_wxyz)
                  for key, robot in preview.get_robot_states().items()}
@@ -228,7 +234,7 @@ def prepare_feed_run(simulation: ConveyorSimulation) -> FeedRun:
             active = [job for job in batch.jobs if job.finished_at_s > now + 1e-8]
             if not (active or preview.on_belt_object_ids or preview.queued_object_ids):
                 break
-            current = camera.observe(preview)
+            current = camera.observe(preview) if preview.on_belt_object_ids else ()
             while len(active) < len(streams) and preview.on_belt_object_ids:
                 for track_id, plan in _candidate_picks(preview, current, slots, active, reasons):
                     try:
@@ -248,11 +254,22 @@ def prepare_feed_run(simulation: ConveyorSimulation) -> FeedRun:
             times.update(round(now + step * _CAMERA_PERIOD_S / 8, 9) for step in range(1, 9))
 
         completed = {job.object_id for job in batch.jobs}
-        missed = tuple((key, reasons.get(key, "no confirmed camera track"))
-                       for key in preview.object_ids if key not in completed)
+        missed = tuple(
+            (spec.object_id, "no sphere grasp profile" if spec.geometry_type == "sphere"
+             else reasons.get(spec.object_id, "no confirmed camera track"))
+            for spec in preview.object_specs if spec.object_id not in completed
+        )
+        if simulation.exit_mode == "fall" and missed:
+            # Allow the last product to reach the edge and drop after the arms stop.
+            largest_footprint = max(2 * planar_half_extents(spec)[0] for spec in preview.object_specs)
+            settle_s = largest_footprint / preview.belt_speed_m_s + 3.0
+            frame_period_s = _CAMERA_PERIOD_S / 8
+            times.update(round(now + step * frame_period_s, 9)
+                         for step in range(1, ceil(settle_s / frame_period_s) + 1))
         batch = _make_batch(streams, batch.jobs, start, times)
         preview.reset()
+        preview.exit_mode = simulation.exit_mode
         _play(preview, batch, check_clearance=True)
-        return FeedRun(batch, missed)
+        return FeedRun(batch, missed, preview.collected_object_ids)
     finally:
         preview.close()

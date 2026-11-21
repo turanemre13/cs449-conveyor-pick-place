@@ -2,7 +2,7 @@
 
 from copy import copy
 from dataclasses import dataclass
-from math import cos, isfinite, pi, sin
+from math import cos, hypot, isfinite, pi, sin
 from numbers import Real
 from typing import ClassVar
 
@@ -80,8 +80,10 @@ class ConveyorSimulation:
         # Paint-like visual strips: no collision or force generation.
         import robotic as ry
 
-        if scenario == "feed":
+        if scenario in ("feed", "showcase"):
             self._add_infeed()
+        if scenario == "showcase":
+            self._add_reject_bin()
 
         for index in range(32):
             seam = self.config.addFrame(f"belt_seam_{index:02d}")
@@ -136,6 +138,28 @@ class ConveyorSimulation:
                     ry.ST.ssBox, [.46, .012, .14, .003],
                 ).setRelativePosition([0.0, y, .07])
 
+    def _add_reject_bin(self) -> None:
+        import robotic as ry
+
+        edge = self._belt_center[0] + self._length / 2
+        width, depth, rim = .75, .52, .25
+        z = .12
+        self._reject_bin_center = (edge + .24, self._belt_center[1], z)
+        self._reject_bin_inner = (width, depth, rim)
+        x, y, _ = self._reject_bin_center
+        parts = (
+            ("bottom", [width + .04, depth + .04, z], [x, y, z / 2]),
+            ("back", [.02, depth + .04, rim], [x - width / 2 - .01, y, z + rim / 2]),
+            ("front", [.02, depth + .04, rim], [x + width / 2 + .01, y, z + rim / 2]),
+            ("near", [width, .02, rim], [x, y - depth / 2 - .01, z + rim / 2]),
+            ("far", [width, .02, rim], [x, y + depth / 2 + .01, z + rim / 2]),
+        )
+        for name, size, position in parts:
+            color = [.46, .27, .25] if name == "bottom" else [.52, .25, .22]
+            self.config.addFrame(f"reject_bin_{name}", "world").setShape(
+                ry.ST.ssBox, [*size, .005],
+            ).setPosition(position).setColor(color).setContact(1)
+
     def copy_for_planning(self) -> "ConveyorSimulation":
         """Copy a kinematic scene at its current time, including attachments."""
         self._require_open()
@@ -184,6 +208,26 @@ class ConveyorSimulation:
     def fallen_object_ids(self) -> tuple[str, ...]:
         return tuple(key for key in self.object_ids if self._motion_states[key] in ("falling", "settled"))
 
+    @property
+    def collected_object_ids(self) -> tuple[str, ...]:
+        """Products inside and below the rim of the downstream bin."""
+        if self.scenario != "showcase":
+            return ()
+        x, y, z = self._reject_bin_center
+        width, depth, rim = self._reject_bin_inner
+        collected = []
+        for spec in self.object_specs:
+            key = spec.object_id
+            if self._motion_states[key] not in ("falling", "settled"):
+                continue
+            px, py, pz = self.config.getFrame(key).getPosition()
+            # A conservative vertical bound avoids counting a body still above
+            # the rim. Spheres can keep rolling after reaching the bin floor.
+            radius = spec.dimensions_m[0] / 2 if spec.geometry_type == "sphere" else hypot(*spec.dimensions_m) / 2
+            if abs(px - x) < width / 2 and abs(py - y) < depth / 2 and z < pz and pz + radius < z + rim:
+                collected.append(key)
+        return tuple(collected)
+
     def reset(self, seed: int | None = None) -> None:
         """Restore a reproducible batch and reset its clock, keeping the Config."""
         selected_seed = self.seed if seed is None else seed
@@ -215,7 +259,7 @@ class ConveyorSimulation:
             self.config.getFrame(name).setJointState(coordinates)
         for spec in specs:
             frame = self.config.addFrame(spec.object_id)
-            if self.scenario == "feed" and spec.position_m[0] < self._infeed_release_x:
+            if self.scenario in ("feed", "showcase") and spec.position_m[0] < self._infeed_release_x:
                 self._motion_states[spec.object_id] = "queued"
             else:
                 self._set_product_shape(frame, spec)
@@ -232,8 +276,10 @@ class ConveyorSimulation:
 
         if spec.geometry_type == "box":
             frame.setShape(ry.ST.ssBox, [*spec.dimensions_m, .005])
-        else:
+        elif spec.geometry_type == "cylinder":
             frame.setShape(ry.ST.cylinder, [spec.dimensions_m[2], spec.dimensions_m[0] / 2])
+        else:
+            frame.setShape(ry.ST.sphere, [spec.dimensions_m[0] / 2])
         frame.setColor(list(spec.color_rgb)).setContact(1).setMass(.12)
 
     def _activate_queued_product(self, frame, spec: ObjectSpec, x: float) -> bool:

@@ -192,3 +192,11 @@ prioritizes cylinders. When the preferred arm cannot make the pick window,
 the scheduler can assign the other arm, which uses its own bin. The arms
 reserve separate jobs and place products in free bin positions. A preview
 with successive camera frames validates the shared motions before playback.
+
+Run `.venv/bin/python scripts/dual_panda_demo.py --showcase` for the nine-product
+demo. It starts with alternating boxes and cylinders, then shows three closely
+spaced boxes with a sphere before and after the burst. The spheres and any
+missed products fall into the end bin using RAI's CPU PhysX dynamics. The display
+counts arm placements and products inside the end bin separately. Each cycle
+holds its final view for five seconds before it repeats. `--no-view` runs one cycle.
+Add `--front-view` to frame both arms, the feeder, and the end bin from the front.

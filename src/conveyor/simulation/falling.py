@@ -5,7 +5,7 @@ objects handed to it. Robot joints and carried objects remain outside this
 world, so the simulator never acts as a robot controller.
 """
 
-from math import ceil, isfinite, sqrt
+from math import floor, isfinite, sqrt
 from numbers import Real
 from typing import TYPE_CHECKING
 
@@ -70,9 +70,10 @@ class FallingObjects:
         self._quiet_s.clear()
         self._velocities.clear()
         self.time_s = 0.0
+        self._pending_s = 0.0
         for name in self._main.getFrameNames():
             if name not in ("floor", "conveyor") and not name.startswith((
-                "conveyor_leg_", "robot_a_pedestal", "robot_b_pedestal", "target_bin_",
+                "conveyor_leg_", "robot_a_pedestal", "robot_b_pedestal", "target_bin_", "reject_bin_",
             )):
                 continue
             source = self._main.getFrame(name)
@@ -100,12 +101,9 @@ class FallingObjects:
             raise ValueError("pose quaternion must have unit length")
 
         velocities = self._read_velocities()
+        source = self._main.getFrame(spec.object_id)
         frame = self._physics.addFrame(spec.object_id)
-        if spec.geometry_type == "box":
-            frame.setShape(self._ry.ST.ssBox, [*spec.dimensions_m, .005])
-        else:
-            frame.setShape(self._ry.ST.cylinder, [spec.dimensions_m[2], spec.dimensions_m[0] / 2])
-        frame.setPose(list(world_pose)).setMass(.12).setContact(1)
+        frame.setShape(source.getShapeType(), source.getSize()).setPose(list(world_pose)).setMass(.12).setContact(1)
         frame.setAttributes({"friction": .45, "restitution": .18})
         self._ids.append(spec.object_id)
         self._quiet_s[spec.object_id] = 0.0
@@ -126,13 +124,17 @@ class FallingObjects:
         self._rebuild_engine(velocities)
 
     def step(self, dt: float) -> None:
-        """Advance PhysX with at most 5 ms internal steps and copy poses back."""
+        """Advance PhysX in fixed 5 ms steps and copy poses back."""
         if isinstance(dt, bool) or not isinstance(dt, Real) or not isfinite(dt) or dt <= 0:
             raise ValueError("dt must be a finite positive number")
         if self._physics is None:
             raise RuntimeError("FallingObjects is closed; call reset before reusing it")
-        count = max(1, ceil(float(dt) / self.MAX_SUBSTEP_S))
-        h = float(dt) / count
+        # Retain fractional steps across camera frames and belt handoffs.
+        # Near-zero remainder steps can destabilize PhysX contacts.
+        h = self.MAX_SUBSTEP_S
+        total = self._pending_s + float(dt)
+        count = floor((total + 1e-12) / h)
+        self._pending_s = max(0.0, total - count * h)
         for _ in range(count):
             if self._engine is not None:
                 self._engine.step([], h, self._ry.ControlMode.none)
@@ -143,7 +145,7 @@ class FallingObjects:
                         and sum(v * v for v in angular) <= self.SETTLE_ANGULAR_RAD_S ** 2
                     )
                     self._quiet_s[key] = self._quiet_s[key] + h if quiet else 0.0
-            self.time_s += h
+        self.time_s += count * h
         for key in self._ids:
             self._main.getFrame(key).setPose(self._physics.getFrame(key).getPose())
 

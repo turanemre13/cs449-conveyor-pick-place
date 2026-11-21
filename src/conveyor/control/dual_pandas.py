@@ -74,7 +74,7 @@ def _start_scene(simulation):
         frame = config.getFrame(name)
         pose = tuple(round(float(value), 9) for value in frame.getPose())
         shapes.append((name, frame.getShapeType(), tuple(frame.getSize()), pose))
-    return simulation.belt_speed_m_s, simulation.object_specs, pairs, tuple(shapes)
+    return simulation.exit_mode, simulation.belt_speed_m_s, simulation.object_specs, pairs, tuple(shapes)
 
 
 def _preview_scene(simulation):

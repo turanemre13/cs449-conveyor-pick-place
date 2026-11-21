@@ -9,6 +9,7 @@ from conveyor.control import feed_pandas
 from conveyor.control.dual_pandas import play_panda_batch
 from conveyor.control.feed_pandas import prepare_feed_run
 from conveyor.simulation import ConveyorSimulation
+from conveyor.simulation.scenarios import generate_scenario
 
 
 @pytest.mark.parametrize("exit_mode", ("remove", "fall"))
@@ -68,6 +69,37 @@ def test_planning_copy_preserves_ownership_without_mutating_the_source():
             assert simulation.get_ground_truth() == before
         finally:
             preview.close()
+    finally:
+        simulation.close()
+
+
+def test_showcase_has_alternation_spheres_and_a_tightly_spaced_box_burst():
+    products = generate_scenario("showcase", seed=7, object_count=9)
+    shapes = [product.geometry_type for product in products]
+    assert shapes[:4] == ["box", "cylinder", "box", "cylinder"]
+    assert shapes[4:] == ["sphere", "box", "box", "box", "sphere"]
+    burst = products[5:8]
+    assert [first.position_m[0] - second.position_m[0] for first, second in zip(burst, burst[1:])] == pytest.approx(
+        [0.18, 0.36],
+    )
+
+
+def test_showcase_reject_bin_catches_each_shape_after_reset():
+    pytest.importorskip("robotic")
+    simulation = ConveyorSimulation(0.12, scenario="showcase", seed=7, object_count=9, exit_mode="fall")
+    try:
+        for _ in range(2):
+            assert simulation.collected_object_ids == ()
+            assert simulation.queued_object_ids == simulation.object_ids[1:]
+            for _ in range(2228):
+                simulation.step(.025)
+            sphere = simulation.get_ground_truth()["object_005"]
+            assert sphere.motion_state == "falling"
+            assert sphere.velocity_m_s[2] < 0
+            for _ in range(692):
+                simulation.step(.025)
+            assert simulation.collected_object_ids == simulation.object_ids
+            simulation.reset()
     finally:
         simulation.close()
 
